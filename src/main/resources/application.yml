@@ -1,0 +1,7 @@
+aws:
+  dynamodb:
+    endpoint: ${AWS_DYNAMODB_ENDPOINT:http://localhost:8000}
+    region: ${AWS_DYNAMODB_REGION:eu-central-1}
+    access-key: ${AWS_ACCESS_KEY_ID:dummy}
+    secret-access-key: ${AWS_SECRET_ACCESS_KEY:dummy}
+    table-name: ${AWS_DYNAMODB_TABLE_NAME:payment-history}
