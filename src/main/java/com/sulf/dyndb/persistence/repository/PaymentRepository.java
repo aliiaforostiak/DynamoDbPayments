@@ -2,6 +2,8 @@ package com.sulf.dyndb.persistence.repository;
 
 import com.sulf.dyndb.persistence.domain.PaymentItem;
 import com.sulf.dyndb.persistence.domain.PaymentPage;
+import com.sulf.dyndb.persistence.domain.PaymentStatus;
+import com.sulf.dyndb.persistence.domain.SortDirection;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 
 import java.time.Instant;
@@ -14,11 +16,12 @@ public interface PaymentRepository {
 
     List<PaymentItem> findAllByCustomerId(String customerId);
 
-    PaymentPage findAllByCustomerIdPaginatedFromNew(String customerId, int limit, Map<String, AttributeValue> exclusiveStartKey);
-
-    PaymentPage findAllByCustomerIdPaginatedFromOld(String customerId, int limit, Map<String, AttributeValue> exclusiveStartKey);
-
-    PaymentPage findPageByCustomerId(String customerId, int limit, Map<String, AttributeValue> exclusiveStartKey);
+    PaymentPage findPageByCustomerId(
+            String customerId,
+            int limit,
+            Map<String, AttributeValue> exclusiveStartKey,
+            SortDirection sortDirection
+    );
 
     Optional<PaymentItem> findByPaymentId(String paymentId);
 
@@ -27,5 +30,11 @@ public interface PaymentRepository {
     Optional<PaymentItem> findByPrimaryKey(
             String pk,
             String sk
+    );
+
+    List<PaymentItem> findStaleByStatus(
+            PaymentStatus status,
+            Instant olderThan,
+            int limit
     );
 }

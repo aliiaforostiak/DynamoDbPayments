@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.*;
 
@@ -31,19 +32,22 @@ public class PaymentService {
     private final PaymentTransactionRepository transactionRepository;
     private final PaymentStateMachine stateMachine;
     private final CursorCodec cursorCodec;
+    private final Clock clock;
 
     public PaymentService(
             PaymentRepository paymentRepository,
             IdempotencyRepository idempotencyRepository,
             PaymentTransactionRepository transactionRepository,
             PaymentStateMachine stateMachine,
-            CursorCodec cursorCodec
+            CursorCodec cursorCodec,
+            Clock clock
     ) {
         this.paymentRepository = paymentRepository;
         this.idempotencyRepository = idempotencyRepository;
         this.transactionRepository = transactionRepository;
         this.stateMachine = stateMachine;
         this.cursorCodec = cursorCodec;
+        this.clock = clock;
     }
 
     public PaymentItem create(
@@ -65,7 +69,7 @@ public class PaymentService {
 
         String paymentId = UUID.randomUUID().toString();
 
-        Instant now = Instant.now();
+        Instant now = clock.instant();
 
         String createdAt = now.toString();
         String paymentPk = customerPartitionKey(customerId);
@@ -77,6 +81,8 @@ public class PaymentService {
         payment.setSk(paymentSk);
 
         payment.setGsi1Pk(paymentPartitionKey(paymentId));
+        payment.setGsi2Pk(statusPartitionKey(PaymentStatus.CREATED));
+        payment.setGsi2Sk(createdAt + KEY_PART_SEPARATOR + paymentId);
 
         payment.setPaymentId(paymentId);
         payment.setCustomerId(customerId);
@@ -237,17 +243,19 @@ public class PaymentService {
         stateMachine.validateTransition(currentStatus, newStatus);
         long expectedVersion = payment.getVersion();
 
-        String now = Instant.now().toString();
+        String now = clock.instant().toString();
 
         payment.setStatus(newStatus.name());
         payment.setUpdatedAt(now);
+        payment.setGsi2Pk(statusPartitionKey(newStatus));
+        payment.setGsi2Sk(now + KEY_PART_SEPARATOR + paymentId);
         payment.setVersion(expectedVersion + 1);
         String eventId = UUID.randomUUID().toString();
 
         PaymentEventItem event = new PaymentEventItem();
 
-        event.setPk(PAYMENT_KEY_PREFIX + paymentId);
-        event.setSk(EVENT_SORT_KEY_PREFIX + now + KEY_PART_SEPARATOR + eventId);
+        event.setPk(paymentPartitionKey(paymentId));
+        event.setSk(eventSortKey(now, eventId));
 
         event.setEventId(eventId);
         event.setPaymentId(paymentId);
@@ -286,9 +294,19 @@ public class PaymentService {
         }
     }
 
-    public PaymentPageResponse findPageByCustomerId(String customerId, int limit, String cursor) {
+    public PaymentPageResponse findPageByCustomerId(
+            String customerId,
+            int limit,
+            String cursor,
+            SortDirection sortDirection
+    ) {
         Map<String, AttributeValue> exclusiveStartKey = decodeCursor(customerId, cursor);
-        PaymentPage page = paymentRepository.findPageByCustomerId(customerId, limit, exclusiveStartKey);
+        PaymentPage page = paymentRepository.findPageByCustomerId(
+                customerId,
+                limit,
+                exclusiveStartKey,
+                sortDirection
+        );
         String nextCursor = encodeCursor(page.lastEvaluatedKey());
         return new PaymentPageResponse(
                 page.items(),
@@ -302,18 +320,18 @@ public class PaymentService {
         }
 
         PaymentCursor decode = cursorCodec.decode(cursor);
-        String expectedPk = CUSTOMER_KEY_PREFIX + customerId;
+        String expectedPk = customerPartitionKey(customerId);
 
         if (!expectedPk.equals(decode.pk())) {
             throw new InvalidCursorException("Invalid pagination cursor");
         }
 
-        return Map.of("pk",
+        return Map.of(PARTITION_KEY_ATTRIBUTE,
                 AttributeValue
                         .builder()
                         .s(decode.pk())
                         .build(),
-                "sk",
+                SORT_KEY_ATTRIBUTE,
                 AttributeValue
                         .builder()
                         .s(decode.sk())
@@ -330,8 +348,8 @@ public class PaymentService {
 
         PaymentCursor cursor =
                 new PaymentCursor(
-                        lastEvaluatedKey.get("pk").s(),
-                        lastEvaluatedKey.get("sk").s()
+                        lastEvaluatedKey.get(PARTITION_KEY_ATTRIBUTE).s(),
+                        lastEvaluatedKey.get(SORT_KEY_ATTRIBUTE).s()
                 );
 
         return cursorCodec.encode(cursor);

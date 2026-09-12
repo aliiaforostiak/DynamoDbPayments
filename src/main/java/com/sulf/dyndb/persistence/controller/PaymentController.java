@@ -3,15 +3,21 @@ package com.sulf.dyndb.persistence.controller;
 import com.sulf.dyndb.persistence.domain.PaymentEventItem;
 import com.sulf.dyndb.persistence.domain.PaymentItem;
 import com.sulf.dyndb.persistence.domain.PaymentPageResponse;
+import com.sulf.dyndb.persistence.domain.SortDirection;
 import com.sulf.dyndb.persistence.service.PaymentEventService;
 import com.sulf.dyndb.persistence.service.PaymentService;
+import com.sulf.dyndb.exception.InvalidPaymentPeriodException;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Instant;
 import java.util.List;
 
 @RestController
+@Validated
 public class PaymentController {
 
     private final PaymentService paymentService;
@@ -59,7 +65,10 @@ public class PaymentController {
             @RequestParam(required = false)
             Instant to
     ) {
-        if (from != null && to != null) {
+        if (from != null || to != null) {
+            if (from == null || to == null || !from.isBefore(to)) {
+                throw new InvalidPaymentPeriodException();
+            }
             return paymentService
                     .findByCustomerAndPeriod(
                             customerId,
@@ -120,7 +129,12 @@ public class PaymentController {
     }
 
     @GetMapping("/customers/{customerId}/page")
-    public PaymentPageResponse findPage(@PathVariable String customerId, @RequestParam(defaultValue = "20") int limit, @RequestParam(required = false) String cursor) {
-        return paymentService.findPageByCustomerId(customerId, limit, cursor);
+    public PaymentPageResponse findPage(
+            @PathVariable String customerId,
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "DESC") SortDirection sortDirection
+    ) {
+        return paymentService.findPageByCustomerId(customerId, limit, cursor, sortDirection);
     }
 }

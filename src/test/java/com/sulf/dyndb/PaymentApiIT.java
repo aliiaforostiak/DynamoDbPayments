@@ -35,6 +35,13 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.EXPIRES_AT_ATTRIBUTE;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.IDEMPOTENCY_REQUEST_SORT_KEY;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.PARTITION_KEY_ATTRIBUTE;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.SORT_KEY_ATTRIBUTE;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.eventSortKey;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.idempotencyPartitionKey;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.paymentPartitionKey;
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -92,7 +99,7 @@ class PaymentApiIT {
                 .extracting(PaymentEventItem::getType)
                 .containsExactly("CREATED", "NOTIFIED");
         assertThat(events).allSatisfy(event ->
-                assertThat(event.getPk()).isEqualTo("PAYMENT#" + payment.getPaymentId())
+                    assertThat(event.getPk()).isEqualTo(paymentPartitionKey(payment.getPaymentId()))
         );
     }
 
@@ -134,6 +141,62 @@ class PaymentApiIT {
                         .queryParam("to", to))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].paymentId").value(payment.getPaymentId()));
+    }
+
+    @Test
+    void paginatesCustomerPaymentsWithoutDuplicates() throws Exception {
+        String customerId = "customer-" + UUID.randomUUID();
+        createPayment(customerId, "key-" + UUID.randomUUID());
+        createPayment(customerId, "key-" + UUID.randomUUID());
+        createPayment(customerId, "key-" + UUID.randomUUID());
+
+        String firstPage = mockMvc.perform(get("/customers/{customerId}/page", customerId)
+                        .queryParam("limit", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andReturn().getResponse().getContentAsString();
+        String cursor = objectMapper.readTree(firstPage).get("nextCursor").asString();
+
+        mockMvc.perform(get("/customers/{customerId}/page", customerId)
+                        .queryParam("limit", "2")
+                        .queryParam("cursor", cursor))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1));
+    }
+
+    @Test
+    void supportsAscendingAndDescendingPaymentSortOrder() throws Exception {
+        String customerId = "customer-" + UUID.randomUUID();
+        PaymentItem first = createPayment(customerId, "key-" + UUID.randomUUID());
+        PaymentItem second = createPayment(customerId, "key-" + UUID.randomUUID());
+
+        mockMvc.perform(get("/customers/{customerId}/page", customerId)
+                        .queryParam("limit", "10")
+                        .queryParam("sortDirection", "ASC"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].paymentId").value(first.getPaymentId()))
+                .andExpect(jsonPath("$.items[1].paymentId").value(second.getPaymentId()));
+
+        mockMvc.perform(get("/customers/{customerId}/page", customerId)
+                        .queryParam("limit", "10")
+                        .queryParam("sortDirection", "DESC"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].paymentId").value(second.getPaymentId()))
+                .andExpect(jsonPath("$.items[1].paymentId").value(first.getPaymentId()));
+    }
+
+    @Test
+    void rejectsInvalidPeriodAndEventsForMissingPayment() throws Exception {
+        mockMvc.perform(get("/customers/{customerId}/payments", UUID.randomUUID())
+                        .queryParam("from", Instant.now().toString()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PAYMENT_PERIOD"));
+
+        mockMvc.perform(post("/payments/{paymentId}/events", UUID.randomUUID())
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"type\":\"NOTIFIED\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("PAYMENT_NOT_FOUND"));
     }
 
     @Test
@@ -186,14 +249,34 @@ class PaymentApiIT {
     }
 
     @Test
+    void reusesAnExpiredIdempotencyKey() throws Exception {
+        String key = "key-" + UUID.randomUUID();
+        PaymentItem first = createPayment("customer-" + UUID.randomUUID(), key);
+
+        dynamoDbClient.updateItem(request -> request
+                .tableName(TABLE_NAME)
+                .key(Map.of(
+                        PARTITION_KEY_ATTRIBUTE, AttributeValue.fromS(idempotencyPartitionKey(key)),
+                        SORT_KEY_ATTRIBUTE, AttributeValue.fromS(IDEMPOTENCY_REQUEST_SORT_KEY)
+                ))
+                .updateExpression("SET #expiresAt = :expiresAt")
+                .expressionAttributeNames(Map.of("#expiresAt", EXPIRES_AT_ATTRIBUTE))
+                .expressionAttributeValues(Map.of(":expiresAt", AttributeValue.fromN("0"))));
+
+        PaymentItem replacement = createPayment("customer-" + UUID.randomUUID(), key);
+
+        assertThat(replacement.getPaymentId()).isNotEqualTo(first.getPaymentId());
+    }
+
+    @Test
     void rejectsStatusTransactionWithStaleVersion() throws Exception {
         PaymentItem payment = createPayment("customer-" + UUID.randomUUID(), "key-" + UUID.randomUUID());
 
         dynamoDbClient.updateItem(request -> request
                 .tableName(TABLE_NAME)
                 .key(Map.of(
-                        "pk", AttributeValue.fromS(payment.getPk()),
-                        "sk", AttributeValue.fromS(payment.getSk())
+                        PARTITION_KEY_ATTRIBUTE, AttributeValue.fromS(payment.getPk()),
+                        SORT_KEY_ATTRIBUTE, AttributeValue.fromS(payment.getSk())
                 ))
                 .updateExpression("SET #version = :version")
                 .expressionAttributeNames(Map.of("#version", "version"))
@@ -204,8 +287,8 @@ class PaymentApiIT {
         payment.setUpdatedAt(Instant.now().toString());
 
         PaymentEventItem event = new PaymentEventItem();
-        event.setPk("PAYMENT#" + payment.getPaymentId());
-        event.setSk("EVENT#" + UUID.randomUUID());
+        event.setPk(paymentPartitionKey(payment.getPaymentId()));
+        event.setSk(eventSortKey(Instant.now().toString(), UUID.randomUUID().toString()));
         event.setEventId(UUID.randomUUID().toString());
         event.setPaymentId(payment.getPaymentId());
         event.setType(PaymentStatus.AUTHORIZED.name());

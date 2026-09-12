@@ -2,12 +2,13 @@ package com.sulf.dyndb.persistence.repository;
 
 import com.sulf.dyndb.persistence.domain.PaymentItem;
 import com.sulf.dyndb.persistence.domain.PaymentPage;
+import com.sulf.dyndb.persistence.domain.PaymentStatus;
+import com.sulf.dyndb.persistence.domain.SortDirection;
 import org.springframework.stereotype.Repository;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbIndex;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
 import software.amazon.awssdk.enhanced.dynamodb.Key;
 import software.amazon.awssdk.enhanced.dynamodb.model.Page;
-import software.amazon.awssdk.enhanced.dynamodb.model.PageIterable;
 import software.amazon.awssdk.enhanced.dynamodb.model.QueryConditional;
 import software.amazon.awssdk.enhanced.dynamodb.model.QueryEnhancedRequest;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
@@ -55,48 +56,34 @@ public class DynamoDbPaymentRepository implements PaymentRepository {
     }
 
     @Override
-    public PaymentPage findAllByCustomerIdPaginatedFromOld(String customerId, int limit, Map<String, AttributeValue> exclusiveStartKey) {
-        String partitionKey = customerPartitionKey(customerId);
-
-        QueryConditional condition = QueryConditional.keyEqualTo(
-                key -> key.partitionValue(partitionKey));
-
-        QueryEnhancedRequest.Builder requestBuilder =
+    public PaymentPage findPageByCustomerId(
+            String customerId,
+            int limit,
+            Map<String, AttributeValue> exclusiveStartKey,
+            SortDirection sortDirection
+    ) {
+        QueryEnhancedRequest.Builder request =
                 QueryEnhancedRequest.builder()
-                        .queryConditional(condition)
-                        .limit(limit);
+                        .queryConditional(customerQuery(customerId))
+                        .limit(limit)
+                        .scanIndexForward(sortDirection.scanIndexForward());
 
         if (exclusiveStartKey != null && !exclusiveStartKey.isEmpty()) {
-            requestBuilder.exclusiveStartKey(exclusiveStartKey);
+            request.exclusiveStartKey(
+                    exclusiveStartKey
+            );
         }
 
-        PageIterable<PaymentItem> pages = paymentTable.query(requestBuilder.build());
-        Page<PaymentItem> page = pages.stream().findFirst().orElseThrow();
+        Page<PaymentItem> page = paymentTable
+                .query(request.build())
+                .stream()
+                .findFirst()
+                .orElseThrow();
 
-        return new PaymentPage(page.items(), page.lastEvaluatedKey());
-    }
-
-    @Override
-    public PaymentPage findAllByCustomerIdPaginatedFromNew(String customerId, int limit, Map<String, AttributeValue> exclusiveStartKey) {
-        String partitionKey = customerPartitionKey(customerId);
-
-        QueryConditional condition = QueryConditional.keyEqualTo(
-                key -> key.partitionValue(partitionKey));
-
-        QueryEnhancedRequest.Builder requestBuilder =
-                QueryEnhancedRequest.builder()
-                        .queryConditional(condition)
-                        .scanIndexForward(false)
-                        .limit(limit);
-
-        if (exclusiveStartKey != null && !exclusiveStartKey.isEmpty()) {
-            requestBuilder.exclusiveStartKey(exclusiveStartKey);
-        }
-
-        PageIterable<PaymentItem> pages = paymentTable.query(requestBuilder.build());
-        Page<PaymentItem> page = pages.stream().findFirst().orElseThrow();
-
-        return new PaymentPage(page.items(), page.lastEvaluatedKey());
+        return new PaymentPage(
+                page.items(),
+                page.lastEvaluatedKey()
+        );
     }
 
     @Override
@@ -166,5 +153,45 @@ public class DynamoDbPaymentRepository implements PaymentRepository {
         );
 
         return Optional.ofNullable(item);
+    }
+
+    @Override
+    public List<PaymentItem> findStaleByStatus(PaymentStatus status, Instant olderThan, int limit) {
+        DynamoDbIndex<PaymentItem> index = paymentTable.index(STATUS_UPDATED_AT_INDEX);
+        String partitionKey = statusPartitionKey(status);
+
+        QueryConditional condition =
+                QueryConditional.sortLessThan(
+                        key ->
+                                key
+                                        .partitionValue(
+                                                partitionKey
+                                        )
+                                        .sortValue(
+                                                olderThan.toString()
+                                        )
+                );
+
+        List<PaymentItem> result = new ArrayList<>();
+
+        index.query(request ->
+                        request
+                                .queryConditional(condition)
+                                .limit(limit)
+                )
+                .stream()
+                .flatMap(page ->
+                        page.items().stream()
+                )
+                .limit(limit)
+                .forEach(result::add);
+
+        return result;
+    }
+
+    private QueryConditional customerQuery(String customerId) {
+        return QueryConditional.keyEqualTo(
+                key -> key.partitionValue(customerPartitionKey(customerId))
+        );
     }
 }

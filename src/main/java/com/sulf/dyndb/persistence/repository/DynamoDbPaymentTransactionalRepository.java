@@ -14,8 +14,17 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 
 import java.util.Map;
 
-import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.IDEMPOTENCY_NOT_EXISTS_CONDITION;
-import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.IDEMPOTENCY_NOT_EXPIRES_CONDITION;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.EXPIRES_AT_ATTRIBUTE;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.IDEMPOTENCY_EXPIRES_AT_ATTRIBUTE_NAME;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.IDEMPOTENCY_NOW_VALUE_NAME;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.IDEMPOTENCY_WRITE_CONDITION;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.EXPECTED_STATUS_VALUE_NAME;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.EXPECTED_VERSION_VALUE_NAME;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.STATUS_ATTRIBUTE;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.STATUS_ATTRIBUTE_NAME;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.STATUS_VERSION_CONDITION;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.VERSION_ATTRIBUTE;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.VERSION_ATTRIBUTE_NAME;
 
 @Repository
 public class DynamoDbPaymentTransactionalRepository implements PaymentTransactionRepository {
@@ -36,12 +45,12 @@ public class DynamoDbPaymentTransactionalRepository implements PaymentTransactio
     public void createPayment(PaymentItem payment, PaymentEventItem createdEvent, IdempotencyItem idempotency, long nowEpochSeconds) {
         Expression idempotencyDoesNotExist = Expression
                 .builder()
-                .expression(IDEMPOTENCY_NOT_EXISTS_CONDITION + " OR " + IDEMPOTENCY_NOT_EXPIRES_CONDITION)
+                .expression(IDEMPOTENCY_WRITE_CONDITION)
                 .expressionNames(Map.of(
-                        "#expiresAt",
-                        "expiresAt"))
+                        IDEMPOTENCY_EXPIRES_AT_ATTRIBUTE_NAME,
+                        EXPIRES_AT_ATTRIBUTE))
                 .expressionValues(Map.of(
-                        ":now",
+                        IDEMPOTENCY_NOW_VALUE_NAME,
                         AttributeValue.builder()
                                 .n(Long.toString(nowEpochSeconds))
                                 .build()
@@ -76,20 +85,19 @@ public class DynamoDbPaymentTransactionalRepository implements PaymentTransactio
     @Override
     public void changeStatus(PaymentItem payment, PaymentEventItem event, PaymentStatus expectedStatus, long expectedVersion) {
         Expression statusCondition = Expression.builder()
-                .expression("#status = :expectedStatus " +
-                        "AND #version = :expectedVersion")
+                .expression(STATUS_VERSION_CONDITION)
                 .expressionNames(Map.of(
-                        "#status",
-                        "status",
-                        "#version",
-                        "version"))
+                        STATUS_ATTRIBUTE_NAME,
+                        STATUS_ATTRIBUTE,
+                        VERSION_ATTRIBUTE_NAME,
+                        VERSION_ATTRIBUTE))
                 .expressionValues(
                         Map.of(
-                                ":expectedStatus",
+                                EXPECTED_STATUS_VALUE_NAME,
                                 AttributeValue.builder()
                                         .s(expectedStatus.name())
                                         .build(),
-                                ":expectedVersion",
+                                EXPECTED_VERSION_VALUE_NAME,
                                 AttributeValue.builder()
                                         .n(Long.toString(expectedVersion))
                                         .build()
