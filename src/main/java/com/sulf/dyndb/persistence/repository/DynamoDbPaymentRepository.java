@@ -4,6 +4,7 @@ import com.sulf.dyndb.persistence.domain.PaymentItem;
 import com.sulf.dyndb.persistence.domain.PaymentPage;
 import com.sulf.dyndb.persistence.domain.PaymentStatus;
 import com.sulf.dyndb.persistence.domain.SortDirection;
+import com.sulf.dyndb.persistence.service.ReconciliationShard;
 import org.springframework.stereotype.Repository;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbIndex;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
@@ -14,10 +15,7 @@ import software.amazon.awssdk.enhanced.dynamodb.model.QueryEnhancedRequest;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 
 import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.*;
 
@@ -156,42 +154,98 @@ public class DynamoDbPaymentRepository implements PaymentRepository {
     }
 
     @Override
-    public List<PaymentItem> findStaleByStatus(PaymentStatus status, Instant olderThan, int limit) {
+    public List<PaymentItem> findStaleByStatusAndShard(PaymentStatus status, int shard, Instant olderThan, int limit) {
         DynamoDbIndex<PaymentItem> index = paymentTable.index(STATUS_UPDATED_AT_INDEX);
-        String partitionKey = statusPartitionKey(status);
-
-        QueryConditional condition =
-                QueryConditional.sortLessThan(
-                        key ->
-                                key
-                                        .partitionValue(
-                                                partitionKey
-                                        )
-                                        .sortValue(
-                                                olderThan.toString()
-                                        )
-                );
-
+        String partitionKey = statusPartitionKey(status, shard);
+        QueryConditional condition = QueryConditional.sortLessThan(key ->
+                key
+                        .partitionValue(partitionKey)
+                        .sortValue(
+                                olderThan.toString()
+                        )
+        );
         List<PaymentItem> result = new ArrayList<>();
-
         index.query(request ->
                         request
                                 .queryConditional(condition)
-                                .limit(limit)
-                )
+                                .limit(limit))
                 .stream()
-                .flatMap(page ->
-                        page.items().stream()
-                )
+                .flatMap(page -> page.items().stream())
                 .limit(limit)
                 .forEach(result::add);
 
         return result;
     }
 
+    @Override
+    public List<PaymentItem> findStaleByStatus(PaymentStatus status, Instant olderThan, int limit) {
+        List<PaymentItem> result = new ArrayList<>();
+
+        for (int shard = 0; shard < ReconciliationShard.shardCount(); shard++) {
+            List<PaymentItem> shardItems = findStaleByStatusAndShard(
+                    status,
+                    shard,
+                    olderThan,
+                    limit
+            );
+
+            result.addAll(shardItems);
+        }
+
+        return result.stream()
+                .sorted(Comparator.comparing(PaymentItem::getUpdatedAt))
+                .limit(limit)
+                .toList();
+    }
+
     private QueryConditional customerQuery(String customerId) {
         return QueryConditional.keyEqualTo(
                 key -> key.partitionValue(customerPartitionKey(customerId))
         );
+    }
+
+    @Override
+    public List<PaymentItem> findDueForReconciliation(
+            Instant now,
+            int limit
+    ) {
+        List<PaymentItem> result = new ArrayList<>();
+
+        for (int shard = 0; shard < ReconciliationShard.shardCount(); shard++) {
+            result.addAll(findDueForReconciliationByShard(shard, now, limit));
+        }
+
+        return result.stream()
+                .sorted(Comparator.comparing(PaymentItem::getReconciliationSk))
+                .limit(limit)
+                .toList();
+    }
+
+    private List<PaymentItem> findDueForReconciliationByShard(
+            int shard,
+            Instant now,
+            int limit
+    ) {
+        DynamoDbIndex<PaymentItem> index = paymentTable.index(RECONCILIATION_INDEX);
+        String partitionKey = reconciliationPartitionKey(shard);
+        QueryConditional condition = QueryConditional.sortLessThanOrEqualTo(key ->
+                key
+                        .partitionValue(partitionKey)
+                        .sortValue(reconciliationDueSortKey(now))
+        );
+
+        List<PaymentItem> result = new ArrayList<>();
+
+        index.query(request ->
+                        request
+                                .queryConditional(condition)
+                                .limit(limit))
+                .stream()
+                .flatMap(page ->
+                        page.items().stream())
+                .limit(limit)
+                .forEach(result::add);
+
+        return result;
     }
 }

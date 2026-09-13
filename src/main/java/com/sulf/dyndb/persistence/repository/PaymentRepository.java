@@ -32,9 +32,21 @@ public interface PaymentRepository {
             String sk
     );
 
+    List<PaymentItem> findStaleByStatusAndShard(
+            PaymentStatus status,
+            int shard,
+            Instant olderThan,
+            int limit
+    );
+
     List<PaymentItem> findStaleByStatus(
             PaymentStatus status,
             Instant olderThan,
+            int limit
+    );
+
+    List<PaymentItem> findDueForReconciliation(
+            Instant now,
             int limit
     );
 }

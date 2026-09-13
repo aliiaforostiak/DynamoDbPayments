@@ -6,6 +6,7 @@ public final class DynamoDbSchema {
 
     public static final String PAYMENT_ID_INDEX = "payment-id-index";
     public static final String STATUS_UPDATED_AT_INDEX = "status-updated-at-index";
+    public static final String RECONCILIATION_INDEX = "reconciliation-index";
 
     public static final String PARTITION_KEY_ATTRIBUTE = "pk";
     public static final String SORT_KEY_ATTRIBUTE = "sk";
@@ -32,6 +33,12 @@ public final class DynamoDbSchema {
     public static final String CUSTOMER_KEY_PREFIX = "CUSTOMER#";
     public static final String STATUS_KEY_PREFIX = "STATUS#";
     public static final String PAYMENT_KEY_PREFIX = "PAYMENT#";
+    public static final String RECONCILIATION_PENDING_KEY_PREFIX = "RECONCILIATION#PENDING#";
+    public static final String RECONCILIATION_DUE_SORT_KEY_SUFFIX = "#~";
+    public static final String OUTBOX_KEY_PREFIX = "OUTBOX#";
+    public static final String OUTBOX_EVENT_SORT_KEY = "EVENT";
+    public static final String OUTBOX_ENTITY_TYPE = "OUTBOX";
+    public static final String PAYMENT_EVENT_TYPE_PREFIX = "PAYMENT_";
     private static final String IDEMPOTENCY_KEY_PREFIX = "IDEMPOTENCY#";
     public static final String KEY_PART_SEPARATOR = "#";
 
@@ -48,6 +55,30 @@ public final class DynamoDbSchema {
 
     public static String statusPartitionKey(PaymentStatus status) {
         return STATUS_KEY_PREFIX + status.name();
+    }
+
+    public static String statusPartitionKey(PaymentStatus status, int shard) {
+        return statusPartitionKey(status) + KEY_PART_SEPARATOR + shard;
+    }
+
+    public static String reconciliationPartitionKey(int shard) {
+        return RECONCILIATION_PENDING_KEY_PREFIX + shard;
+    }
+
+    public static String reconciliationSortKey(Instant dueAt, String paymentId) {
+        return dueAt + KEY_PART_SEPARATOR + paymentId;
+    }
+
+    public static String reconciliationDueSortKey(Instant dueAt) {
+        return dueAt + RECONCILIATION_DUE_SORT_KEY_SUFFIX;
+    }
+
+    public static String outboxPartitionKey(String eventId) {
+        return OUTBOX_KEY_PREFIX + eventId;
+    }
+
+    public static String paymentEventType(PaymentStatus status) {
+        return PAYMENT_EVENT_TYPE_PREFIX + status.name();
     }
 
     public static String paymentSortKey(String createdAt, String paymentId) {

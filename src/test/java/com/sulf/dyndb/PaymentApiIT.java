@@ -6,6 +6,7 @@ import com.sulf.dyndb.persistence.controller.CreatePaymentRequest;
 import com.sulf.dyndb.persistence.domain.PaymentEventItem;
 import com.sulf.dyndb.persistence.domain.PaymentItem;
 import com.sulf.dyndb.persistence.domain.PaymentStatus;
+import com.sulf.dyndb.persistence.domain.OutboxItem;
 import com.sulf.dyndb.persistence.repository.PaymentTransactionRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,6 +20,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
 
@@ -42,6 +44,10 @@ import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.SORT_KEY_ATTRIBUT
 import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.eventSortKey;
 import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.idempotencyPartitionKey;
 import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.paymentPartitionKey;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.paymentEventType;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.outboxPartitionKey;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.OUTBOX_ENTITY_TYPE;
+import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.OUTBOX_EVENT_SORT_KEY;
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -68,6 +74,9 @@ class PaymentApiIT {
 
     @Autowired
     private PaymentTransactionRepository transactionRepository;
+
+    @Autowired
+    private DynamoDbTable<OutboxItem> outboxTable;
 
     @DynamicPropertySource
     static void dynamoDbProperties(DynamicPropertyRegistry registry) {
@@ -220,6 +229,18 @@ class PaymentApiIT {
 
         assertThat(events(payment.getPaymentId())).extracting(PaymentEventItem::getType)
                 .containsExactly("CREATED", "AUTHORIZED", "CAPTURED", "REFUNDED");
+
+        List<OutboxItem> outboxItems = outboxTable.scan().items().stream()
+                .filter(item -> payment.getPaymentId().equals(item.getPaymentId()))
+                .filter(item -> item.getEventType() != null)
+                .toList();
+        assertThat(outboxItems).extracting(OutboxItem::getEventType)
+                .containsExactlyInAnyOrder(
+                        paymentEventType(PaymentStatus.AUTHORIZED),
+                        paymentEventType(PaymentStatus.CAPTURED),
+                        paymentEventType(PaymentStatus.REFUNDED)
+                );
+        assertThat(outboxItems).allSatisfy(item -> assertThat(item.getExpiresAt()).isPositive());
     }
 
     @Test
@@ -294,9 +315,19 @@ class PaymentApiIT {
         event.setType(PaymentStatus.AUTHORIZED.name());
         event.setCreatedAt(Instant.now().toString());
 
+        OutboxItem outbox = new OutboxItem();
+        String outboxEventId = UUID.randomUUID().toString();
+        outbox.setPk(outboxPartitionKey(outboxEventId));
+        outbox.setSk(OUTBOX_EVENT_SORT_KEY);
+        outbox.setEntityType(OUTBOX_ENTITY_TYPE);
+        outbox.setEventId(outboxEventId);
+        outbox.setPaymentId(payment.getPaymentId());
+        outbox.setEventType(paymentEventType(PaymentStatus.AUTHORIZED));
+
         assertThatThrownBy(() -> transactionRepository.changeStatus(
                 payment,
                 event,
+                outbox,
                 PaymentStatus.CREATED,
                 0L
         )).isInstanceOf(TransactionCanceledException.class);

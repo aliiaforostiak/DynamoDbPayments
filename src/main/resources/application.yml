@@ -5,3 +5,13 @@ aws:
     access-key: ${AWS_ACCESS_KEY_ID:dummy}
     secret-access-key: ${AWS_SECRET_ACCESS_KEY:dummy}
     table-name: ${AWS_DYNAMODB_TABLE_NAME:payment-history}
+spring:
+  kafka:
+    bootstrap-servers: kafka:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+
+      properties:
+        enable.idempotence: true

@@ -5,6 +5,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import software.amazon.awssdk.services.dynamodb.model.DynamoDbException;
 
 import java.time.Instant;
 
@@ -66,4 +67,30 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.BAD_REQUEST, "INVALID_PAYMENT_PERIOD", exception);
     }
 
+    @ExceptionHandler(DynamoDbException.class)
+    public ResponseEntity<ErrorResponse> handleDynamoDb(
+            DynamoDbException exception
+    ) {
+        if (exception.isThrottlingException()) {
+            return ResponseEntity
+                    .status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(
+                            new ErrorResponse(
+                                    "DYNAMODB_THROTTLED",
+                                    "Service is temporarily unavailable",
+                                    Instant.now()
+                            )
+                    );
+        }
+
+        return ResponseEntity
+                .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(
+                        new ErrorResponse(
+                                "DYNAMODB_ERROR",
+                                "Failed to access payment storage",
+                                Instant.now()
+                        )
+                );
+    }
 }

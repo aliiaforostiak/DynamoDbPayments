@@ -18,8 +18,8 @@ public class PaymentItem extends BaseDynamoDbBean {
     private String updatedAt;
 
     private String gsi1Pk;
-    private String gsi2Pk;
-    private String gsi2Sk;
+    private String reconciliationPk;
+    private String reconciliationSk;
 
     private Long version;
 
@@ -35,22 +35,22 @@ public class PaymentItem extends BaseDynamoDbBean {
         this.gsi1Pk = gsi1Pk;
     }
 
-    @DynamoDbSecondaryPartitionKey(indexNames = DynamoDbSchema.STATUS_UPDATED_AT_INDEX)
-    public String getGsi2Pk() {
-        return gsi2Pk;
+    @DynamoDbSecondaryPartitionKey(indexNames = DynamoDbSchema.RECONCILIATION_INDEX)
+    public String getReconciliationPk() {
+        return reconciliationPk;
     }
 
-    public void setGsi2Pk(String gsi2Pk) {
-        this.gsi2Pk = gsi2Pk;
+    public void setReconciliationPk(String reconciliationPk) {
+        this.reconciliationPk = reconciliationPk;
     }
 
-    @DynamoDbSecondarySortKey(indexNames = DynamoDbSchema.STATUS_UPDATED_AT_INDEX)
-    public String getGsi2Sk() {
-        return gsi2Sk;
+    @DynamoDbSecondarySortKey(indexNames = DynamoDbSchema.RECONCILIATION_INDEX)
+    public String getReconciliationSk() {
+        return reconciliationSk;
     }
 
-    public void setGsi2Sk(String gsi2Sk) {
-        this.gsi2Sk = gsi2Sk;
+    public void setReconciliationSk(String reconciliationSk) {
+        this.reconciliationSk = reconciliationSk;
     }
 
     public String getPaymentId() {

@@ -16,8 +16,8 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.Duration;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 
@@ -27,6 +27,11 @@ import static com.sulf.dyndb.persistence.domain.DynamoDbSchema.*;
 public class PaymentService {
 
     private static final Duration IDEMPOTENCY_TTL = Duration.ofHours(24);
+    private static final Duration RECONCILIATION_DELAY = Duration.ofMinutes(30);
+    private static final Duration OUTBOX_TTL = Duration.ofDays(7);
+    private static final String REQUEST_HASH_ALGORITHM = "SHA-256";
+    private static final String REQUEST_HASH_SEPARATOR = "|";
+    private static final String CONDITIONAL_CHECK_FAILED_CODE = "ConditionalCheckFailed";
     private final PaymentRepository paymentRepository;
     private final IdempotencyRepository idempotencyRepository;
     private final PaymentTransactionRepository transactionRepository;
@@ -81,9 +86,6 @@ public class PaymentService {
         payment.setSk(paymentSk);
 
         payment.setGsi1Pk(paymentPartitionKey(paymentId));
-        payment.setGsi2Pk(statusPartitionKey(PaymentStatus.CREATED));
-        payment.setGsi2Sk(createdAt + KEY_PART_SEPARATOR + paymentId);
-
         payment.setPaymentId(paymentId);
         payment.setCustomerId(customerId);
         payment.setAmount(amount);
@@ -193,17 +195,17 @@ public class PaymentService {
             String currency
     ) {
         String canonicalRequest = customerId
-                + "|"
+                + REQUEST_HASH_SEPARATOR
                 + amount
                 .stripTrailingZeros()
                 .toPlainString()
-                + "|"
+                + REQUEST_HASH_SEPARATOR
                 + currency
                 .toUpperCase(Locale.ROOT);
 
         try {
             byte[] hash = MessageDigest
-                    .getInstance("SHA-256")
+                    .getInstance(REQUEST_HASH_ALGORITHM)
                     .digest(canonicalRequest.getBytes(StandardCharsets.UTF_8));
 
             return HexFormat
@@ -235,37 +237,47 @@ public class PaymentService {
     }
 
     public PaymentItem changeStatus(String paymentId, PaymentStatus newStatus) {
-
         PaymentItem payment = paymentRepository.findByPaymentId(paymentId)
                 .orElseThrow(() -> new PaymentNotFoundException(paymentId));
+
+        Instant now = clock.instant();
+        String nowInstant = now.toString();
 
         PaymentStatus currentStatus = PaymentStatus.valueOf(payment.getStatus());
         stateMachine.validateTransition(currentStatus, newStatus);
         long expectedVersion = payment.getVersion();
-
-        String now = clock.instant().toString();
-
         payment.setStatus(newStatus.name());
-        payment.setUpdatedAt(now);
-        payment.setGsi2Pk(statusPartitionKey(newStatus));
-        payment.setGsi2Sk(now + KEY_PART_SEPARATOR + paymentId);
+        payment.setUpdatedAt(nowInstant);
         payment.setVersion(expectedVersion + 1);
+        updateReconciliationSchedule(payment, newStatus, now);
+
         String eventId = UUID.randomUUID().toString();
-
         PaymentEventItem event = new PaymentEventItem();
-
         event.setPk(paymentPartitionKey(paymentId));
-        event.setSk(eventSortKey(now, eventId));
-
+        event.setSk(eventSortKey(nowInstant, eventId));
         event.setEventId(eventId);
         event.setPaymentId(paymentId);
         event.setType(newStatus.name());
-        event.setCreatedAt(now);
+        event.setCreatedAt(nowInstant);
+
+        OutboxItem outbox = new OutboxItem();
+        outbox.setPk(outboxPartitionKey(eventId));
+        outbox.setSk(OUTBOX_EVENT_SORT_KEY);
+        outbox.setEntityType(OUTBOX_ENTITY_TYPE);
+        outbox.setEventId(eventId);
+        outbox.setEventType(paymentEventType(newStatus));
+        outbox.setPaymentId(paymentId);
+        outbox.setPreviousStatus(currentStatus.name());
+        outbox.setNewStatus(newStatus.name());
+        outbox.setPaymentVersion(expectedVersion + 1);
+        outbox.setCreatedAt(now.toString());
+        outbox.setExpiresAt(now.plus(OUTBOX_TTL).getEpochSecond());
 
         try {
             transactionRepository.changeStatus(
                     payment,
                     event,
+                    outbox,
                     currentStatus,
                     expectedVersion
             );
@@ -276,7 +288,7 @@ public class PaymentService {
 
             boolean optimisticLockFailed =
                     !exception.cancellationReasons().isEmpty()
-                            && "ConditionalCheckFailed".equals(
+                            && CONDITIONAL_CHECK_FAILED_CODE.equals(
                             exception
                                     .cancellationReasons()
                                     .getFirst()
@@ -341,17 +353,32 @@ public class PaymentService {
     private String encodeCursor(
             Map<String, AttributeValue> lastEvaluatedKey
     ) {
-        if (lastEvaluatedKey == null
-                || lastEvaluatedKey.isEmpty()) {
+        if (lastEvaluatedKey == null || lastEvaluatedKey.isEmpty()) {
             return null;
         }
 
-        PaymentCursor cursor =
-                new PaymentCursor(
-                        lastEvaluatedKey.get(PARTITION_KEY_ATTRIBUTE).s(),
-                        lastEvaluatedKey.get(SORT_KEY_ATTRIBUTE).s()
-                );
+        PaymentCursor cursor = new PaymentCursor(
+                lastEvaluatedKey.get(PARTITION_KEY_ATTRIBUTE).s(),
+                lastEvaluatedKey.get(SORT_KEY_ATTRIBUTE).s()
+        );
 
         return cursorCodec.encode(cursor);
+    }
+
+    private void updateReconciliationSchedule(
+            PaymentItem payment,
+            PaymentStatus newStatus,
+            Instant now
+    ) {
+        if (newStatus == PaymentStatus.AUTHORIZED) {
+            int shard = ReconciliationShard.resolve(payment.getPaymentId());
+            Instant nextCheckAt = now.plus(RECONCILIATION_DELAY);
+            payment.setReconciliationPk(reconciliationPartitionKey(shard));
+            payment.setReconciliationSk(reconciliationSortKey(nextCheckAt, payment.getPaymentId()));
+            return;
+        }
+
+        payment.setReconciliationPk(null);
+        payment.setReconciliationSk(null);
     }
 }

@@ -1,6 +1,7 @@
 package com.sulf.dyndb.config;
 
 import com.sulf.dyndb.persistence.domain.IdempotencyItem;
+import com.sulf.dyndb.persistence.domain.OutboxItem;
 import com.sulf.dyndb.persistence.domain.PaymentEventItem;
 import com.sulf.dyndb.persistence.domain.PaymentItem;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -71,4 +72,13 @@ public class DynamoDbConfig {
         );
     }
 
+    @Bean
+    public DynamoDbTable<OutboxItem> outboxTable(
+            DynamoDbEnhancedClient enhancedClient,
+            DynamoDbProperties properties) {
+        return enhancedClient
+                .table(properties.tableName(),
+                        TableSchema.fromBean(OutboxItem.class));
+
+    }
 }
